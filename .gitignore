@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Private environment variables
+.env
+
+# Temporary audio files
+temp_*.wav
+
+# DS_Store
+.DS_Store
