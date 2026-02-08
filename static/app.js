@@ -150,6 +150,24 @@ document.addEventListener('DOMContentLoaded', () => {
         noteTreatment.innerText = data.note.treatment;
         noteFollowup.innerText = data.note.follow_up;
 
+        // Sync Print Template
+        const printBody = document.getElementById('print-note-body');
+        const sections = [
+            { title: 'Presenting Complaints', content: data.note.presenting_complaints },
+            { title: 'Past History', content: data.note.past_history },
+            { title: 'Investigations Ordered', content: data.note.investigations_ordered },
+            { title: 'Diagnosis', content: data.note.diagnosis },
+            { title: 'Treatment', content: data.note.treatment },
+            { title: 'Follow-up', content: data.note.follow_up }
+        ];
+
+        printBody.innerHTML = sections.map(s => `
+            <div class="print-section">
+                <h3>${s.title}</h3>
+                <div class="print-section-content">${s.content}</div>
+            </div>
+        `).join('');
+
         // Fill Patient Questions
         patientQuestions.innerHTML = '';
         data.questions.forEach(q => {
