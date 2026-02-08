@@ -45,16 +45,17 @@ async def serve_static_fallback(file_path: str):
         return FileResponse(file_full_path)
     return FileResponse("static/index.html")
 
-class SOAPNote(BaseModel):
-    subjective: str
-    objective: str
-    assessment: str
-    plan: str
+class MedicalNote(BaseModel):
+    presenting_complaints: str
+    past_history: str
+    investigations_ordered: str
+    diagnosis: str
+    treatment: str
+    follow_up: str
 
 class ClinicalDocumentation(BaseModel):
-    soap: SOAPNote
+    note: MedicalNote
     questions: List[str]
-    tests: List[str]
     transcript: str
     error: str = None  # To inform user about API issues
 
@@ -62,7 +63,7 @@ class ClinicalDocumentation(BaseModel):
 async def analyze_audio(audio: UploadFile = File(...)):
     """
     Receives audio file, transcribes it using Whisper (excellent for Hindi),
-    and generates clinical documentation using GPT-4o.
+    and generates clinical documentation using GPT-4o-mini.
     """
     temp_file_path = f"temp_{audio.filename}"
     if not temp_file_path.endswith(".wav"):
@@ -84,31 +85,37 @@ async def analyze_audio(audio: UploadFile = File(...)):
             transcript_response = client.audio.transcriptions.create(
                 model="whisper-1", 
                 file=audio_file,
-                # Whisper automatically detects Hindi, but we can nudge it
                 language="hi" 
             )
         
         transcript_text = transcript_response.text
 
-        # 3. Generate structured clinical notes using GPT-4o
+        # 3. Generate structured clinical notes using GPT-4o-mini
         system_prompt = """
         You are an expert medical scribe. You will receive a transcript of a doctor-patient encounter (potentially in Hindi or Hinglish).
-        Your task is to:
-        1. Generate a professional SOAP note in English.
-        2. List questions asked by the patient during the encounter.
-        3. List any tests ordered by the doctor during the encounter.
+        Your task is to generate a professional medical note in English with these exact sections:
+        1. Presenting Complaints: The patient's current symptoms and reasons for visit.
+        2. Past History: Any relevant previous medical conditions or treatments mentioned.
+        3. Investigations Ordered: Laboratory tests, imaging, or other diagnostics mentioned.
+        4. Diagnosis: The doctor's assessment or suspected conditions.
+        5. Treatment: Medications prescribed or therapeutic actions planned.
+        6. Follow-up: When and why the patient should return.
+
+        Also:
+        - List questions/concerns asked by the patient.
         
         Never hallucinate or add information that is not present in the transcript.
         Format the output as a JSON object with the following structure:
         {
-          "soap": {
-            "subjective": "...",
-            "objective": "...",
-            "assessment": "...",
-            "plan": "..."
+          "note": {
+            "presenting_complaints": "...",
+            "past_history": "...",
+            "investigations_ordered": "...",
+            "diagnosis": "...",
+            "treatment": "...",
+            "follow_up": "..."
           },
-          "questions": ["...", "..."],
-          "tests": ["...", "..."]
+          "questions": ["...", "..."]
         }
         """
 
@@ -141,23 +148,19 @@ async def analyze_audio(audio: UploadFile = File(...)):
 def get_hindi_mock_data(error_msg=None):
     """Fallback mock data for Hindi encounters."""
     return {
-        "soap": {
-            "subjective": "Patient reports severe headache and fever for 2 days. Describes it as 'sir mein bahut dard aur tez bukhaar'. Mentions body ache and fatigue. (Translated from Hindi conversation)",
-            "objective": "Temp: 101.5 F. BP: 120/80. No signs of meningitis. Throat appears slightly congested.",
-            "assessment": "1. Viral Fever with Myalgia.\n2. Rule out Dengue/Malaria.",
-            "plan": "1. Tab. Paracetamol 650mg SOS for fever.\n2. Complete Blood Count (CBC).\n3. Re-evaluate if symptoms persist for 48 hours."
+        "note": {
+            "presenting_complaints": "Severe headache and fever for 2 days. Describes it as 'sir mein bahut dard aur tez bukhaar'.",
+            "past_history": "Patient mentions mild hypertension in the past, no regular medication.",
+            "investigations_ordered": "Complete Blood Count (CBC), Dengue NS1 Antigen.",
+            "diagnosis": "Viral Fever, suspected Dengue.",
+            "treatment": "Tab. Paracetamol 650mg SOS for fever, plenty of oral fluids.",
+            "follow_up": "Return in 48 hours for review or earlier if abdominal pain develops."
         },
         "questions": [
-            "Kya aapko thand lag kar bukhaar aa raha hai? (Do you feel chills with the fever?)",
-            "Aapne koi dawai li hai ab tak? (Have you taken any medicine yet?)",
-            "Body rash ya vomiting jaisa kuch hai? (Any body rash or vomiting?)"
+            "Kya aapko thand lag kar bukhaar aa raha hai?",
+            "Body rash ya vomiting jaisa kuch hai?"
         ],
-        "tests": [
-            "CBC (Complete Blood Count)",
-            "NS1 Antigen for Dengue",
-            "Malaria Parasite test"
-        ],
-        "transcript": "नमस्ते डॉक्टर साहब, मुझे दो दिन से बहुत तेज़ बुख़ार और सिर में दर्द है। पूरा बदन टूट रहा है।"
+        "transcript": "नमस्ते डॉक्टर साहब, मुझे दो दिन से बहुत तेज़ बुख़ar और सिर में दर्द है। पूरा बदन टूट रहा है।"
     }
 
 if __name__ == "__main__":

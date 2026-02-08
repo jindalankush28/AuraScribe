@@ -15,12 +15,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const loadingOverlay = document.getElementById('loading-overlay');
 
     // Output Sections
-    const soapSubjective = document.getElementById('soap-subjective');
-    const soapObjective = document.getElementById('soap-objective');
-    const soapAssessment = document.getElementById('soap-assessment');
-    const soapPlan = document.getElementById('soap-plan');
+    const noteComplaints = document.getElementById('note-complaints');
+    const noteHistory = document.getElementById('note-history');
+    const noteInvestigations = document.getElementById('note-investigations');
+    const noteDiagnosis = document.getElementById('note-diagnosis');
+    const noteTreatment = document.getElementById('note-treatment');
+    const noteFollowup = document.getElementById('note-followup');
     const patientQuestions = document.getElementById('patient-questions');
-    const testsOrdered = document.getElementById('tests-ordered');
 
     // Recording Logic
     recordBtn.addEventListener('click', async () => {
@@ -141,11 +142,13 @@ document.addEventListener('DOMContentLoaded', () => {
             alert(`Note: We are showing demo data because of an API issue: ${data.error}`);
         }
 
-        // Fill SOAP Note
-        soapSubjective.innerText = data.soap.subjective;
-        soapObjective.innerText = data.soap.objective;
-        soapAssessment.innerText = data.soap.assessment;
-        soapPlan.innerText = data.soap.plan;
+        // Fill Medical Note
+        noteComplaints.innerText = data.note.presenting_complaints;
+        noteHistory.innerText = data.note.past_history;
+        noteInvestigations.innerText = data.note.investigations_ordered;
+        noteDiagnosis.innerText = data.note.diagnosis;
+        noteTreatment.innerText = data.note.treatment;
+        noteFollowup.innerText = data.note.follow_up;
 
         // Fill Patient Questions
         patientQuestions.innerHTML = '';
@@ -155,38 +158,36 @@ document.addEventListener('DOMContentLoaded', () => {
             patientQuestions.appendChild(li);
         });
 
-        // Fill Tests Ordered
-        testsOrdered.innerHTML = '';
-        data.tests.forEach(t => {
-            const li = document.createElement('li');
-            li.innerText = t;
-            testsOrdered.appendChild(li);
-        });
-
         // Scroll to results
         outputContainer.scrollIntoView({ behavior: 'smooth' });
     }
 
     // Copy to clipboard functionality
-    document.getElementById('copy-soap').addEventListener('click', () => {
+    document.getElementById('copy-note').addEventListener('click', () => {
         const textToCopy = `
-SOAP NOTE
-----------
-SUBJECTIVE:
-${soapSubjective.innerText}
+MEDICAL NOTE
+------------
+PRESENTING COMPLAINTS:
+${noteComplaints.innerText}
 
-OBJECTIVE:
-${soapObjective.innerText}
+PAST HISTORY:
+${noteHistory.innerText}
 
-ASSESSMENT:
-${soapAssessment.innerText}
+INVESTIGATIONS ORDERED:
+${noteInvestigations.innerText}
 
-PLAN:
-${soapPlan.innerText}
+DIAGNOSIS:
+${noteDiagnosis.innerText}
+
+TREATMENT:
+${noteTreatment.innerText}
+
+FOLLOW-UP:
+${noteFollowup.innerText}
         `.trim();
 
         navigator.clipboard.writeText(textToCopy).then(() => {
-            const btn = document.getElementById('copy-soap');
+            const btn = document.getElementById('copy-note');
             const originalText = btn.innerText;
             btn.innerText = 'Copied!';
             btn.style.background = 'var(--success)';
@@ -195,5 +196,10 @@ ${soapPlan.innerText}
                 btn.style.background = '';
             }, 2000);
         });
+    });
+
+    // Print functionality
+    document.getElementById('print-btn').addEventListener('click', () => {
+        window.print();
     });
 });

@@ -64,28 +64,39 @@
 
             <div id="output-container" class="output-container hidden">
                 <div class="grid-layout">
-                    <!-- SOAP Note Card -->
-                    <div class="card glass soap-card">
-                        <div class="card-header">
-                            <h2>SOAP Note</h2>
-                            <button class="copy-btn" id="copy-soap">Copy</button>
+                    <!-- Medical Note Card -->
+                    <div class="card glass medical-note-card" id="printable-note">
+                        <div class="card-header no-print">
+                            <h2>Medical Note</h2>
+                            <div class="card-actions">
+                                <button class="copy-btn" id="copy-note">Copy</button>
+                                <button class="copy-btn print-btn" id="print-btn">Print</button>
+                            </div>
                         </div>
-                        <div class="soap-sections">
+                        <div class="note-sections">
                             <div class="section">
-                                <h3>Subjective</h3>
-                                <div id="soap-subjective" class="content-placeholder"></div>
+                                <h3>Presenting Complaints</h3>
+                                <div id="note-complaints" class="content-placeholder"></div>
                             </div>
                             <div class="section">
-                                <h3>Objective</h3>
-                                <div id="soap-objective" class="content-placeholder"></div>
+                                <h3>Past History</h3>
+                                <div id="note-history" class="content-placeholder"></div>
                             </div>
                             <div class="section">
-                                <h3>Assessment</h3>
-                                <div id="soap-assessment" class="content-placeholder"></div>
+                                <h3>Investigations Ordered</h3>
+                                <div id="note-investigations" class="content-placeholder"></div>
                             </div>
                             <div class="section">
-                                <h3>Plan</h3>
-                                <div id="soap-plan" class="content-placeholder"></div>
+                                <h3>Diagnosis</h3>
+                                <div id="note-diagnosis" class="content-placeholder"></div>
+                            </div>
+                            <div class="section">
+                                <h3>Treatment</h3>
+                                <div id="note-treatment" class="content-placeholder"></div>
+                            </div>
+                            <div class="section">
+                                <h3>Follow-up</h3>
+                                <div id="note-followup" class="content-placeholder"></div>
                             </div>
                         </div>
                     </div>
@@ -105,14 +116,6 @@
                                 <h2>Patient Questions</h2>
                             </div>
                             <ul id="patient-questions" class="list-content">
-                            </ul>
-                        </div>
-
-                        <div class="card glass compact-card">
-                            <div class="card-header">
-                                <h2>Tests Ordered</h2>
-                            </div>
-                            <ul id="tests-ordered" class="list-content">
                             </ul>
                         </div>
                     </div>

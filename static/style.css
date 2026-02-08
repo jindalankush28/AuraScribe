@@ -143,6 +143,7 @@ h1 {
 .gradient-text {
     background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary));
     -webkit-background-clip: text;
+    background-clip: text;
     -webkit-text-fill-color: transparent;
 }
 
@@ -360,6 +361,7 @@ h2 {
     font-size: 1.5rem;
     background: linear-gradient(90deg, #fff, #a0a0b0);
     -webkit-background-clip: text;
+    background-clip: text;
     -webkit-text-fill-color: transparent;
 }
 
@@ -455,9 +457,64 @@ h2 {
     }
 }
 
-footer {
-    text-align: center;
-    padding: 4rem;
-    color: var(--text-secondary);
-    font-size: 0.9rem;
+/* Print Styles */
+@media print {
+    body * {
+        visibility: hidden;
+    }
+
+    #printable-note,
+    #printable-note * {
+        visibility: visible;
+    }
+
+    #printable-note {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        background: white !important;
+        color: black !important;
+        box-shadow: none !important;
+        border: none !important;
+        padding-top: 150px !important;
+        /* Space for institution header */
+        padding-bottom: 100px !important;
+        /* Space for footer */
+        margin: 0 !important;
+    }
+
+    .no-print {
+        display: none !important;
+    }
+
+    .section h3 {
+        color: black !important;
+        border-bottom: 1px solid #ccc;
+        margin-top: 20px;
+    }
+
+    .content-placeholder {
+        color: black !important;
+        border-left: none !important;
+        padding-left: 0 !important;
+    }
+
+    .glass {
+        backdrop-filter: none !important;
+        background: white !important;
+    }
+}
+
+.card-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.print-btn {
+    background: var(--accent-secondary) !important;
+}
+
+.print-btn:hover {
+    filter: brightness(1.2);
 }
