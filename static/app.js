@@ -163,7 +163,13 @@ document.addEventListener('DOMContentLoaded', () => {
         };
 
         const formatList = (list) => {
-            if (!Array.isArray(list) || list.length === 0) return "Not mentioned";
+            if (!list) return "Not mentioned";
+            if (typeof list === 'string') return list;
+            if (!Array.isArray(list)) {
+                // Handle case where LLM might return a single object instead of a list
+                return `• ${formatItem(list)}`;
+            }
+            if (list.length === 0) return "Not mentioned";
             return list.map(item => `• ${formatItem(item)}`).join('\n');
         };
 
@@ -307,12 +313,17 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         // Use the library to generate and save
-        html2pdf().set(opt).from(cleanContent).save().then(() => {
-            console.log('PDF saved successfully');
-        }).catch(err => {
-            console.error('PDF error:', err);
-            alert('Could not generate PDF. Please try again.');
-        });
+        try {
+            html2pdf().set(opt).from(cleanContent).save().then(() => {
+                console.log('PDF saved successfully');
+            }).catch(err => {
+                console.error('PDF library error:', err);
+                alert('Could not generate PDF. Please try again.');
+            });
+        } catch (e) {
+            console.error('PDF Catch error:', e);
+            alert('PDF generation failed: ' + e.message);
+        }
     });
 
     // Copy to clipboard functionality
