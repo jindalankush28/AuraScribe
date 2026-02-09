@@ -22,6 +22,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const noteTreatment = document.getElementById('note-treatment');
     const noteFollowup = document.getElementById('note-followup');
     const patientQuestions = document.getElementById('patient-questions');
+    const editBtn = document.getElementById('edit-note');
+    const pdfBtn = document.getElementById('pdf-btn');
+    let isEditingNotes = false;
 
     // Recording Logic
     recordBtn.addEventListener('click', async () => {
@@ -106,7 +109,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const formData = new FormData();
             formData.append('audio', audioBlob, 'recording.wav');
 
-            const response = await fetch('/analyze', {
+            const backendUrl = window.location.port === '3000' ? 'http://localhost:8000/analyze' : '/analyze';
+
+            const response = await fetch(backendUrl, {
                 method: 'POST',
                 body: formData
             });
@@ -142,22 +147,42 @@ document.addEventListener('DOMContentLoaded', () => {
             alert(`Note: We are showing demo data because of an API issue: ${data.error}`);
         }
 
+        // Format helper
+        const formatItem = (item) => {
+            if (item.complaint) return item.complaint;
+            if (item.history_item) return item.history_item;
+            if (item.test) return item.test;
+            if (item.treatment) return item.treatment;
+            if (item.diagnosis) {
+                let d = item.diagnosis;
+                if (item.type) d += ` (${item.type})`;
+                if (item.icd_code) d += ` [ICD: ${item.icd_code}]`;
+                return d;
+            }
+            return JSON.stringify(item);
+        };
+
+        const formatList = (list) => {
+            if (!Array.isArray(list) || list.length === 0) return "Not mentioned";
+            return list.map(item => `• ${formatItem(item)}`).join('\n');
+        };
+
         // Fill Medical Note
-        noteComplaints.innerText = data.note.presenting_complaints;
-        noteHistory.innerText = data.note.past_history;
-        noteInvestigations.innerText = data.note.investigations_ordered;
-        noteDiagnosis.innerText = data.note.diagnosis;
-        noteTreatment.innerText = data.note.treatment;
-        noteFollowup.innerText = data.note.follow_up;
+        noteComplaints.innerText = formatList(data.note.presenting_complaints);
+        noteHistory.innerText = formatList(data.note.past_history);
+        noteInvestigations.innerText = formatList(data.note.investigations_ordered);
+        noteDiagnosis.innerText = formatList(data.note.diagnosis);
+        noteTreatment.innerText = formatList(data.note.treatment);
+        noteFollowup.innerText = data.note.follow_up || "Not mentioned";
 
         // Sync Print Template
         const printBody = document.getElementById('print-note-body');
         const sections = [
-            { title: 'Presenting Complaints', content: data.note.presenting_complaints },
-            { title: 'Past History', content: data.note.past_history },
-            { title: 'Investigations Ordered', content: data.note.investigations_ordered },
-            { title: 'Diagnosis', content: data.note.diagnosis },
-            { title: 'Treatment', content: data.note.treatment },
+            { title: 'Presenting Complaints', content: formatList(data.note.presenting_complaints) },
+            { title: 'Past History', content: formatList(data.note.past_history) },
+            { title: 'Investigations Ordered', content: formatList(data.note.investigations_ordered) },
+            { title: 'Diagnosis', content: formatList(data.note.diagnosis) },
+            { title: 'Treatment', content: formatList(data.note.treatment) },
             { title: 'Follow-up', content: data.note.follow_up }
         ];
 
@@ -179,6 +204,116 @@ document.addEventListener('DOMContentLoaded', () => {
         // Scroll to results
         outputContainer.scrollIntoView({ behavior: 'smooth' });
     }
+
+    // Edit functionality
+    editBtn.addEventListener('click', () => {
+        const sections = [
+            noteComplaints, noteHistory, noteInvestigations,
+            noteDiagnosis, noteTreatment, noteFollowup
+        ];
+
+        isEditingNotes = !isEditingNotes;
+
+        if (isEditingNotes) {
+            sections.forEach(s => {
+                s.contentEditable = "true";
+                s.classList.add('editing');
+            });
+            editBtn.innerText = 'Save Changes';
+            editBtn.style.background = 'var(--accent)';
+        } else {
+            sections.forEach(s => {
+                s.contentEditable = "false";
+                s.classList.remove('editing');
+            });
+            editBtn.innerText = 'Edit';
+            editBtn.style.background = '';
+
+            // Re-sync print template with edited content
+            const printBody = document.getElementById('print-note-body');
+            const sectionTitles = [
+                'Presenting Complaints', 'Past History', 'Investigations Ordered',
+                'Diagnosis', 'Treatment', 'Follow-up'
+            ];
+
+            printBody.innerHTML = sections.map((s, i) => `
+                <div class="print-section">
+                    <h3>${sectionTitles[i]}</h3>
+                    <div class="print-section-content">${s.innerText.replace(/\n/g, '<br>')}</div>
+                </div>
+            `).join('');
+        }
+    });
+
+    // Save as PDF functionality
+    pdfBtn.addEventListener('click', () => {
+        const element = document.getElementById('printable-note');
+
+        // Prompt for filename
+        let filename = prompt("Enter a name for the PDF file:", "Medical_Note_" + new Date().toLocaleDateString().replace(/\//g, '-'));
+
+        if (filename === null) return; // Cancelled
+        if (!filename.trim()) filename = "AuraScribe_Medical_Note";
+        if (!filename.endsWith('.pdf')) filename += '.pdf';
+
+        const opt = {
+            margin: 15,
+            filename: filename,
+            image: { type: 'jpeg', quality: 0.98 },
+            html2canvas: {
+                scale: 2,
+                useCORS: true,
+                letterRendering: true,
+                logging: false
+            },
+            jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+        };
+
+        // Create a temporary container for a clean export
+        const cleanContent = document.createElement('div');
+        cleanContent.style.padding = '20px';
+        cleanContent.style.color = 'black';
+        cleanContent.style.fontFamily = 'Arial, sans-serif';
+
+        // Add a title header for the PDF
+        const header = document.createElement('h1');
+        header.innerText = 'Clinical Medical Note';
+        header.style.textAlign = 'center';
+        header.style.borderBottom = '2px solid #333';
+        header.style.paddingBottom = '10px';
+        header.style.marginBottom = '20px';
+        cleanContent.appendChild(header);
+
+        // Copy sections
+        const sections = element.querySelectorAll('.section');
+        sections.forEach(sec => {
+            const clone = sec.cloneNode(true);
+            clone.style.marginBottom = '20px';
+            clone.style.pageBreakInside = 'avoid';
+
+            // Fix colors for PDF
+            const h3 = clone.querySelector('h3');
+            if (h3) {
+                h3.style.color = '#1a56db';
+                h3.style.borderBottom = '1px solid #1a56db';
+            }
+            const content = clone.querySelector('.content-placeholder');
+            if (content) {
+                content.style.color = '#333';
+                content.style.borderLeft = '2px solid #1a56db';
+            }
+
+            cleanContent.appendChild(clone);
+        });
+
+        // Use the library to generate and save
+        html2pdf().set(opt).from(cleanContent).save().then(() => {
+            console.log('PDF saved successfully');
+        }).catch(err => {
+            console.error('PDF error:', err);
+            alert('Could not generate PDF. Please try again.');
+        });
+    });
 
     // Copy to clipboard functionality
     document.getElementById('copy-note').addEventListener('click', () => {

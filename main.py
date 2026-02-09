@@ -2,7 +2,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings
-from typing import List
+from typing import List, Optional
 import os
 import json
 from openai import OpenAI
@@ -45,19 +45,42 @@ async def serve_static_fallback(file_path: str):
         return FileResponse(file_full_path)
     return FileResponse("static/index.html")
 
-class MedicalNote(BaseModel):
-    presenting_complaints: str
-    past_history: str
-    investigations_ordered: str
+class Complaint(BaseModel):
+    complaint: str
+
+class PastHistoryItem(BaseModel):
+    history_item: str
+
+class InvestigationItem(BaseModel):
+    test: str
+
+class DiagnosisItem(BaseModel):
     diagnosis: str
+    type: str  # primary, suspect, DD
+    icd_code: Optional[str] = None
+
+class TreatmentItem(BaseModel):
     treatment: str
+
+class MedicalNote(BaseModel):
+    presenting_complaints: List[Complaint]
+    past_history: List[PastHistoryItem]
+    investigations_ordered: List[InvestigationItem]
+    diagnosis: List[DiagnosisItem]
+    treatment: List[TreatmentItem]
     follow_up: str
 
+class ClinicalDocumentationResponse(BaseModel):
+    """Structured response from LLM"""
+    note: MedicalNote
+    questions: List[str]
+
 class ClinicalDocumentation(BaseModel):
+    """Full response including metadata"""
     note: MedicalNote
     questions: List[str]
     transcript: str
-    error: str = None  # To inform user about API issues
+    error: Optional[str] = None
 
 import time
 import random
@@ -138,52 +161,43 @@ Return a JSON object with the following exact structure:
 
 {
   "note": {
-    "presenting_complaints": "<string>",
-    "past_history": "<string>",
-    "investigations_ordered": "<string>",
-    "diagnosis": "<string>",
-    "treatment": "<string>",
+    "presenting_complaints": [{"complaint": "<string>"}],
+    "past_history": [{"history_item": "<string>"}],
+    "investigations_ordered": [{"test": "<string>"}],
+    "diagnosis": [{"diagnosis": "<string>", "type": "primary|suspect|DD", "icd_code": "<string>"}],
+    "treatment": [{"treatment": "<string>"}],
     "follow_up": "<string>"
   },
-  "questions": ["<string>", "<string>"]
+  "questions": ["<string>"]
 }
 
 SECTION GUIDELINES:
 
 1. PRESENTING COMPLAINTS:
-   - Chief complaint(s) and reason for visit
-   - Current symptoms with duration, severity, and characteristics
-   - Use format: "[Symptom] for [duration], described as [characteristics]"
-   - Example: "Fever for 3 days, reaching 102°F, with chills and body aches. Dry cough for 2 days."
+   - Provide a list of complaint objects
+   - Each object should have a "complaint" field containing the symptom and its characteristics
+   - Example: [{"complaint": "Fever for 3 days, reaching 102°F, with chills"}]
 
 2. PAST HISTORY:
-   - Previous medical conditions, surgeries, or chronic illnesses
-   - Relevant family history if mentioned
-   - Previous similar episodes
-   - Allergies (if mentioned)
-   - Use format: "Past Medical History: [conditions]. Surgical History: [surgeries]. Family History: [relevant]. Allergies: [allergies]."
-   - Example: "Past Medical History: Type 2 Diabetes (5 years), Hypertension. Surgical History: Appendectomy (2018). Family History: Father had heart disease. Allergies: None known."
+   - Provide a list of history objects
+   - Each object should have a "history_item" field
+   - Example: [{"history_item": "Type 2 Diabetes (5 years)"}, {"history_item": "Appendectomy (2018)"}]
 
 3. INVESTIGATIONS ORDERED:
-   - Laboratory tests (blood work, urine tests, etc.)
-   - Imaging studies (X-ray, CT, MRI, ultrasound)
-   - Other diagnostic procedures
-   - List each investigation on a new line with "- " prefix
-   - Example: "- Complete Blood Count (CBC)\n- Chest X-ray\n- Rapid antigen test for influenza"
+   - Provide a list of investigation objects
+   - Each object should have a "test" field
+   - Example: [{"test": "Complete Blood Count (CBC)"}, {"test": "Chest X-ray"}]
 
 4. DIAGNOSIS:
-   - Primary diagnosis or working diagnosis, you must always suspect the most probable diagnosis based on the symptoms and history if diagnosis is not mentioned.
-   - Differential diagnoses if mentioned
-   - Use format: "Primary: [main diagnosis]. Differential: [alternative diagnoses if any]."
-   - Include ICD codes if mentioned
-   - Example: "Primary: Acute Upper Respiratory Tract Infection (likely viral). Differential: Early pneumonia, allergic rhinitis. Suspected: Common Cold."
+   - Provide a list of diagnosis objects
+   - Each object must have "diagnosis" (name), "type" (one of: 'primary', 'suspect', or 'DD'), and optional "icd_code".
+   - You must always suspect the most probable diagnosis if not explicitly stated.
+   - Example: [{"diagnosis": "Acute URI", "type": "primary", "icd_code": "J06.9"}, {"diagnosis": "Pneumonia", "type": "DD"}]
 
 5. TREATMENT:
-   - Medications prescribed with dosage, frequency, and duration
-   - Non-pharmacological interventions
-   - Lifestyle modifications recommended
-   - Format medications as: "[Drug name] [dose] [route] [frequency] for [duration]"
-   - Example: "Medications:\n- Paracetamol 500mg oral every 6 hours for 5 days (for fever)\n- Cetirizine 10mg oral once daily for 7 days (for allergic symptoms)\n\nNon-pharmacological:\n- Adequate rest and hydration\n- Steam inhalation twice daily\n- Avoid cold foods and drinks"
+   - Provide a list of treatment objects
+   - Each object should have a "treatment" field
+   - Example: [{"treatment": "Paracetamol 500mg oral every 6 hours for 5 days"}, {"treatment": "Adequate rest and hydration"}]
 
 6. FOLLOW-UP:
    - When to return (specific timeframe)
@@ -205,68 +219,45 @@ IMPORTANT REMINDERS:
 - If information is ambiguous or unclear, note this in the relevant section
 """
 
-        # Try to get valid JSON response with retry
-        analysis = None
+        # Use structured output parsing
+        analysis_data = None
         last_error = None
         
         for attempt in range(2):
             try:
+                # Use beta.chat.completions.parse for Pydantic integration
                 response = call_with_retries(
-                    client.chat.completions.create,
+                    client.beta.chat.completions.parse,
                     model="gpt-4o-mini",
-                    temperature=0.2,
+                    temperature=0,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": f"Transcript: {transcript_text}"}
                     ],
-                    response_format={"type": "json_object"}
+                    response_format=ClinicalDocumentationResponse
                 )
                 
-                # Parse the JSON response
-                analysis = json.loads(response.choices[0].message.content)
+                # Get the parsed object
+                parsed_response = response.choices[0].message.parsed
+                if not parsed_response:
+                    raise ValueError("Failed to parse response into model")
                 
-                # Validate required structure
-                if "note" not in analysis:
-                    raise ValueError("Response missing 'note' field")
-                
-                required_fields = ["presenting_complaints", "past_history", "investigations_ordered", 
-                                 "diagnosis", "treatment", "follow_up"]
-                missing_fields = [f for f in required_fields if f not in analysis["note"]]
-                
-                if missing_fields:
-                    raise ValueError(f"Note missing required fields: {', '.join(missing_fields)}")
-                
-                if "questions" not in analysis:
-                    analysis["questions"] = []
-                
-                # Success - break out of retry loop
+                analysis_data = parsed_response.model_dump()
                 break
                 
-            except json.JSONDecodeError as je:
-                last_error = f"Invalid JSON from LLM: {str(je)}"
-                if attempt == 0:
-                    print(f"JSON Parse Error (attempt {attempt + 1}): {je}. Retrying...")
-                    continue
-                else:
-                    raise HTTPException(status_code=500, detail=last_error)
-                    
-            except ValueError as ve:
-                last_error = f"Invalid response structure: {str(ve)}"
-                if attempt == 0:
-                    print(f"Structure validation error (attempt {attempt + 1}): {ve}. Retrying...")
-                    continue
-                else:
-                    raise HTTPException(status_code=500, detail=last_error)
-                    
             except Exception as e:
-                last_error = f"LLM call failed: {str(e)}"
-                raise HTTPException(status_code=500, detail=last_error)
+                last_error = str(e)
+                if attempt == 0:
+                    print(f"Extraction Error (attempt {attempt + 1}): {e}. Retrying...")
+                    continue
+                else:
+                    raise HTTPException(status_code=500, detail=f"LLM extraction failed: {last_error}")
 
-        if not analysis:
+        if not analysis_data:
             raise HTTPException(status_code=500, detail=f"Failed to generate valid analysis: {last_error}")
 
-        analysis["transcript"] = transcript_text
-        return analysis
+        analysis_data["transcript"] = transcript_text
+        return analysis_data
         
     except HTTPException:
         # Re-raise HTTP exceptions as-is
@@ -286,12 +277,12 @@ def get_hindi_mock_data(error_msg=None):
     """Fallback mock data for Hindi encounters."""
     return {
         "note": {
-            "presenting_complaints": "Severe headache and fever for 2 days. Describes it as 'sir mein bahut dard aur tez bukhaar'.",
-            "past_history": "Patient mentions mild hypertension in the past, no regular medication.",
-            "investigations_ordered": "Complete Blood Count (CBC), Dengue NS1 Antigen.",
-            "diagnosis": "Viral Fever, suspected Dengue.",
-            "treatment": "Tab. Paracetamol 650mg SOS for fever, plenty of oral fluids.",
-            "follow_up": "Return in 48 hours for review or earlier if abdominal pain develops."
+            "presenting_complaints": [{"complaint": "Severe headache for 2 days"}, {"complaint": "High fever"}],
+            "past_history": [{"history_item": "Mild hypertension"}],
+            "investigations_ordered": [{"test": "CBC"}, {"test": "Dengue NS1"}],
+            "diagnosis": [{"diagnosis": "Viral Fever", "type": "primary"}, {"diagnosis": "Dengue", "type": "suspect"}],
+            "treatment": [{"treatment": "Tab. Paracetamol 650mg SOS"}, {"treatment": "Oral fluids"}],
+            "follow_up": "Return in 48 hours for review."
         },
         "questions": [
             "Kya aapko thand lag kar bukhaar aa raha hai?",

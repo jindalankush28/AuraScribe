@@ -11,6 +11,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 </head>
 
 <body>
@@ -69,7 +70,9 @@
                         <div class="card-header no-print">
                             <h2>Medical Note</h2>
                             <div class="card-actions">
+                                <button class="copy-btn" id="edit-note">Edit</button>
                                 <button class="copy-btn" id="copy-note">Copy</button>
+                                <button class="copy-btn" id="pdf-btn">Download PDF</button>
                                 <button class="copy-btn print-btn" id="print-btn">Print</button>
                             </div>
                         </div>
