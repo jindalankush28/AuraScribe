@@ -251,113 +251,95 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Save as PDF functionality
-    pdfBtn.addEventListener('click', () => {
-        const element = document.getElementById('printable-note');
-
+    // Save as PDF functionality - Direct jsPDF approach (most reliable)
+    pdfBtn.addEventListener('click', async () => {
         // Prompt for filename
         let filename = prompt("Enter a name for the PDF file:", "Medical_Note_" + new Date().toLocaleDateString().replace(/\//g, '-'));
-        if (filename === null) return; // Cancelled
+        if (filename === null) return;
         if (!filename.trim()) filename = "AuraScribe_Medical_Note";
         if (!filename.endsWith('.pdf')) filename += '.pdf';
 
-        const opt = {
-            margin: 15,
-            filename: filename,
-            image: { type: 'jpeg', quality: 0.98 },
-            html2canvas: {
-                scale: 2,
-                useCORS: true,
-                letterRendering: true,
-                logging: false,
-                backgroundColor: '#ffffff'  // Add explicit white background
-            },
-            jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
-        };
+        try {
+            // Import jsPDF
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF({
+                orientation: 'portrait',
+                unit: 'mm',
+                format: 'a4'
+            });
 
-        // Create a temporary container for a clean export
-        const cleanContent = document.createElement('div');
-        cleanContent.id = 'pdf-export-container';
+            let yPosition = 20;
+            const pageWidth = 210;
+            const margin = 20;
+            const contentWidth = pageWidth - (2 * margin);
 
-        // FIXED: Make visible but overlay on page instead of off-screen
-        cleanContent.style.position = 'fixed';
-        cleanContent.style.left = '0';  // Changed from '-9999px'
-        cleanContent.style.top = '0';
-        cleanContent.style.width = '180mm';
-        cleanContent.style.padding = '20px';
-        cleanContent.style.backgroundColor = '#ffffff';  // Explicit white
-        cleanContent.style.color = '#000000';  // Explicit black
-        cleanContent.style.fontFamily = 'Arial, sans-serif';
-        cleanContent.style.zIndex = '9999';  // Changed to overlay on top
-        cleanContent.style.opacity = '0';  // Make invisible to user but renderable
-        cleanContent.style.pointerEvents = 'none';  // Don't interfere with clicks
+            // Title
+            doc.setFontSize(20);
+            doc.setFont(undefined, 'bold');
+            doc.text('Clinical Medical Note', pageWidth / 2, yPosition, { align: 'center' });
 
-        // Add a title header for the PDF
-        const header = document.createElement('h1');
-        header.innerText = 'Clinical Medical Note';
-        header.style.textAlign = 'center';
-        header.style.borderBottom = '2px solid #333';
-        header.style.paddingBottom = '10px';
-        header.style.marginBottom = '20px';
-        header.style.color = '#000000';
-        header.style.fontSize = '18pt';
-        header.style.backgroundColor = 'transparent';
-        cleanContent.appendChild(header);
+            yPosition += 5;
+            doc.setFontSize(10);
+            doc.setFont(undefined, 'normal');
+            doc.setTextColor(100);
+            doc.text(new Date().toLocaleDateString(), pageWidth / 2, yPosition, { align: 'center' });
 
-        // Copy sections
-        const sections = element.querySelectorAll('.section');
-        sections.forEach(sec => {
-            const clone = sec.cloneNode(true);
-            clone.style.marginBottom = '20px';
-            clone.style.pageBreakInside = 'avoid';
-            clone.style.display = 'block';
-            clone.style.backgroundColor = '#ffffff';  // Explicit white
+            yPosition += 10;
+            doc.setLineWidth(0.5);
+            doc.line(margin, yPosition, pageWidth - margin, yPosition);
+            yPosition += 10;
 
-            // Fix colors for PDF
-            const h3 = clone.querySelector('h3');
-            if (h3) {
-                h3.style.color = '#1a56db';
-                h3.style.borderBottom = '1px solid #1a56db';
-                h3.style.display = 'block';
-                h3.style.margin = '0 0 10px 0';
-                h3.style.fontSize = '14pt';
-                h3.style.backgroundColor = 'transparent';
-            }
+            const sections = [
+                { title: 'Presenting Complaints', element: noteComplaints },
+                { title: 'Past History', element: noteHistory },
+                { title: 'Investigations Ordered', element: noteInvestigations },
+                { title: 'Diagnosis', element: noteDiagnosis },
+                { title: 'Treatment', element: noteTreatment },
+                { title: 'Follow-up', element: noteFollowup }
+            ];
 
-            const content = clone.querySelector('.content-placeholder');
-            if (content) {
-                content.style.color = '#333333';
-                content.style.backgroundColor = 'transparent';
-                content.style.borderLeft = '2px solid #1a56db';
-                content.style.display = 'block';
-                content.style.paddingLeft = '15px';
-                content.style.fontSize = '11pt';
-                content.style.whiteSpace = 'pre-wrap';
+            sections.forEach((section, index) => {
+                // Section title
+                doc.setFontSize(14);
+                doc.setFont(undefined, 'bold');
+                doc.setTextColor(26, 86, 219); // Blue color
+                doc.text(section.title, margin, yPosition);
+                yPosition += 2;
 
-                // Sync content from the current state (handles edits)
-                content.innerText = sec.querySelector('.content-placeholder').innerText;
-            }
+                // Underline
+                doc.setDrawColor(26, 86, 219);
+                doc.setLineWidth(0.3);
+                doc.line(margin, yPosition, pageWidth - margin, yPosition);
+                yPosition += 6;
 
-            cleanContent.appendChild(clone);
-        });
+                // Section content
+                doc.setFontSize(11);
+                doc.setFont(undefined, 'normal');
+                doc.setTextColor(50);
 
-        // Add to DOM
-        document.body.appendChild(cleanContent);
+                const content = section.element.innerText || 'Not mentioned';
+                const lines = doc.splitTextToSize(content, contentWidth - 10);
 
-        // Wait a moment for rendering before capturing
-        setTimeout(() => {
-            html2pdf().set(opt).from(cleanContent).save()
-                .then(() => {
-                    console.log('PDF saved successfully');
-                    document.body.removeChild(cleanContent);
-                })
-                .catch(err => {
-                    console.error('PDF library error:', err);
-                    alert('Could not generate PDF. Please try again.');
-                    if (document.body.contains(cleanContent))
-                        document.body.removeChild(cleanContent);
+                lines.forEach(line => {
+                    if (yPosition > 270) { // Check if we need a new page
+                        doc.addPage();
+                        yPosition = 20;
+                    }
+                    doc.text(line, margin + 5, yPosition);
+                    yPosition += 6;
                 });
-        }, 100);  // Small delay to ensure DOM is fully rendered
+
+                yPosition += 5; // Space between sections
+            });
+
+            // Save the PDF
+            doc.save(filename);
+            console.log('PDF saved successfully');
+
+        } catch (error) {
+            console.error('PDF generation failed:', error);
+            alert('Could not generate PDF: ' + error.message);
+        }
     });
 
     // Copy to clipboard functionality
