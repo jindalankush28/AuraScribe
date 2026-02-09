@@ -257,7 +257,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Prompt for filename
         let filename = prompt("Enter a name for the PDF file:", "Medical_Note_" + new Date().toLocaleDateString().replace(/\//g, '-'));
-
         if (filename === null) return; // Cancelled
         if (!filename.trim()) filename = "AuraScribe_Medical_Note";
         if (!filename.endsWith('.pdf')) filename += '.pdf';
@@ -270,16 +269,28 @@ document.addEventListener('DOMContentLoaded', () => {
                 scale: 2,
                 useCORS: true,
                 letterRendering: true,
-                logging: false
+                logging: false,
+                backgroundColor: '#ffffff'  // Add explicit white background
             },
             jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
         };
 
         // Create a temporary container for a clean export
         const cleanContent = document.createElement('div');
+        cleanContent.id = 'pdf-export-container';
+
+        // FIXED: Make visible but overlay on page instead of off-screen
+        cleanContent.style.position = 'fixed';
+        cleanContent.style.left = '0';  // Changed from '-9999px'
+        cleanContent.style.top = '0';
+        cleanContent.style.width = '180mm';
         cleanContent.style.padding = '20px';
-        cleanContent.style.color = 'black';
+        cleanContent.style.backgroundColor = '#ffffff';  // Explicit white
+        cleanContent.style.color = '#000000';  // Explicit black
         cleanContent.style.fontFamily = 'Arial, sans-serif';
+        cleanContent.style.zIndex = '9999';  // Changed to overlay on top
+        cleanContent.style.opacity = '0';  // Make invisible to user but renderable
+        cleanContent.style.pointerEvents = 'none';  // Don't interfere with clicks
 
         // Add a title header for the PDF
         const header = document.createElement('h1');
@@ -288,6 +299,9 @@ document.addEventListener('DOMContentLoaded', () => {
         header.style.borderBottom = '2px solid #333';
         header.style.paddingBottom = '10px';
         header.style.marginBottom = '20px';
+        header.style.color = '#000000';
+        header.style.fontSize = '18pt';
+        header.style.backgroundColor = 'transparent';
         cleanContent.appendChild(header);
 
         // Copy sections
@@ -296,34 +310,54 @@ document.addEventListener('DOMContentLoaded', () => {
             const clone = sec.cloneNode(true);
             clone.style.marginBottom = '20px';
             clone.style.pageBreakInside = 'avoid';
+            clone.style.display = 'block';
+            clone.style.backgroundColor = '#ffffff';  // Explicit white
 
             // Fix colors for PDF
             const h3 = clone.querySelector('h3');
             if (h3) {
                 h3.style.color = '#1a56db';
                 h3.style.borderBottom = '1px solid #1a56db';
+                h3.style.display = 'block';
+                h3.style.margin = '0 0 10px 0';
+                h3.style.fontSize = '14pt';
+                h3.style.backgroundColor = 'transparent';
             }
+
             const content = clone.querySelector('.content-placeholder');
             if (content) {
-                content.style.color = '#333';
+                content.style.color = '#333333';
+                content.style.backgroundColor = 'transparent';
                 content.style.borderLeft = '2px solid #1a56db';
+                content.style.display = 'block';
+                content.style.paddingLeft = '15px';
+                content.style.fontSize = '11pt';
+                content.style.whiteSpace = 'pre-wrap';
+
+                // Sync content from the current state (handles edits)
+                content.innerText = sec.querySelector('.content-placeholder').innerText;
             }
 
             cleanContent.appendChild(clone);
         });
 
-        // Use the library to generate and save
-        try {
-            html2pdf().set(opt).from(cleanContent).save().then(() => {
-                console.log('PDF saved successfully');
-            }).catch(err => {
-                console.error('PDF library error:', err);
-                alert('Could not generate PDF. Please try again.');
-            });
-        } catch (e) {
-            console.error('PDF Catch error:', e);
-            alert('PDF generation failed: ' + e.message);
-        }
+        // Add to DOM
+        document.body.appendChild(cleanContent);
+
+        // Wait a moment for rendering before capturing
+        setTimeout(() => {
+            html2pdf().set(opt).from(cleanContent).save()
+                .then(() => {
+                    console.log('PDF saved successfully');
+                    document.body.removeChild(cleanContent);
+                })
+                .catch(err => {
+                    console.error('PDF library error:', err);
+                    alert('Could not generate PDF. Please try again.');
+                    if (document.body.contains(cleanContent))
+                        document.body.removeChild(cleanContent);
+                });
+        }, 100);  // Small delay to ensure DOM is fully rendered
     });
 
     // Copy to clipboard functionality
