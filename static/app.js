@@ -38,7 +38,10 @@ document.addEventListener('DOMContentLoaded', () => {
     async function startRecording() {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            mediaRecorder = new MediaRecorder(stream);
+            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus'
+                           : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm'
+                           : '';
+            mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
             audioChunks = [];
 
             mediaRecorder.ondataavailable = (event) => {
@@ -46,8 +49,10 @@ document.addEventListener('DOMContentLoaded', () => {
             };
 
             mediaRecorder.onstop = () => {
-                const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-                processRecording(audioBlob);
+                const actualMime = mediaRecorder.mimeType || 'audio/webm';
+                const ext = actualMime.includes('webm') ? 'webm' : actualMime.includes('ogg') ? 'ogg' : 'wav';
+                const audioBlob = new Blob(audioChunks, { type: actualMime });
+                processRecording(audioBlob, ext);
             };
 
             mediaRecorder.start();
@@ -99,15 +104,15 @@ document.addEventListener('DOMContentLoaded', () => {
         clearInterval(timerInterval);
     }
 
-    async function processRecording(audioBlob) {
+    async function processRecording(audioBlob, ext = 'webm') {
         // Show loading state
         loadingOverlay.classList.remove('hidden');
 
-        console.log('Sending audio to backend for analysis...', audioBlob.size, 'bytes');
+        console.log('Sending audio to backend for analysis...', audioBlob.size, 'bytes', 'type:', audioBlob.type);
 
         try {
             const formData = new FormData();
-            formData.append('audio', audioBlob, 'recording.wav');
+            formData.append('audio', audioBlob, `recording.${ext}`);
 
             const backendUrl = window.location.port === '3000' ? 'http://localhost:8000/analyze' : '/analyze';
 

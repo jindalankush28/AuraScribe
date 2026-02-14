@@ -5,8 +5,21 @@ from pydantic_settings import BaseSettings
 from typing import List, Optional
 import os
 import json
+import logging
+import time
+import random
 from openai import OpenAI
 from dotenv import load_dotenv
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -110,9 +123,8 @@ async def analyze_audio(audio: UploadFile = File(...)):
     Receives audio file, transcribes it using Whisper (excellent for Hindi),
     and generates clinical documentation using GPT-4o-mini.
     """
+    logger.info(f"Received audio analysis request for file: {audio.filename}")
     temp_file_path = f"temp_{audio.filename}"
-    if not temp_file_path.endswith(".wav"):
-        temp_file_path += ".wav"
 
     try:
         # Validate API key
@@ -131,20 +143,29 @@ async def analyze_audio(audio: UploadFile = File(...)):
         
         # 2. Transcribe using OpenAI Whisper
         try:
+            logger.info("Starting transcription...")
             with open(temp_file_path, "rb") as audio_file:
+                logger.info("Audio file opened")
                 transcript_response = call_with_retries(
                     client.audio.transcriptions.create,
-                    model="whisper-1", 
+                    model="gpt-4o-mini-transcribe", 
                     file=audio_file,
-                    language="hi" 
+                    language="hi",
+                    response_format="json"
                 )
+            logger.info("transciption complete")
             transcript_text = transcript_response.text
+            logger.info(f"Transcription complete. Length: {len(transcript_text)} characters")
             
             if not transcript_text or not transcript_text.strip():
+                logger.warning("Transcription returned empty text")
                 raise HTTPException(status_code=400, detail="Transcription returned empty text")
                 
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+            logger.error(f"Transcription failed: {str(e)}")
+            mock_data = get_hindi_mock_data()
+            mock_data["error"] = f"Transcription failed: {str(e)}. Using mock data."
+            return mock_data
 
         # 3. Generate structured clinical notes using GPT-4o-mini
         system_prompt = """
@@ -228,8 +249,8 @@ IMPORTANT REMINDERS:
                 # Use beta.chat.completions.parse for Pydantic integration
                 response = call_with_retries(
                     client.beta.chat.completions.parse,
-                    model="gpt-4o-mini",
-                    temperature=0,
+                    model="gpt-5-nano",
+                    reasoning_effort="low",
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": f"Transcript: {transcript_text}"}
@@ -247,10 +268,12 @@ IMPORTANT REMINDERS:
                 
             except Exception as e:
                 last_error = str(e)
+                logger.error(f"Extraction Error (attempt {attempt + 1}): {e}")
                 if attempt == 0:
-                    print(f"Extraction Error (attempt {attempt + 1}): {e}. Retrying...")
+                    logger.info("Retrying extraction...")
                     continue
                 else:
+                    logger.critical(f"LLM extraction failed after retries: {last_error}")
                     raise HTTPException(status_code=500, detail=f"LLM extraction failed: {last_error}")
 
         if not analysis_data:
