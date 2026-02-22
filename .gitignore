@@ -14,6 +14,13 @@ wheels/
 
 # Temporary audio files
 temp_*.wav
+temp_*.webm
+temp_*.ogg
+
+# SQLite database (local patient data)
+aurascribe.db
+aurascribe.db-shm
+aurascribe.db-wal
 
 # DS_Store
 .DS_Store

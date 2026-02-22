@@ -27,6 +27,8 @@
             <span class="logo-text">AuraScribe</span>
         </div>
         <div class="nav-links">
+            <button class="nav-btn" id="nav-scribe" onclick="showScreen('home')">Scribe</button>
+            <button class="nav-btn" id="nav-daily" onclick="showScreen('daily')">Today's Patients</button>
             <span class="status-indicator" id="connection-status">
                 <span class="dot"></span> System Ready
             </span>
@@ -34,12 +36,61 @@
     </nav>
 
     <main>
-        <section class="hero">
+        <!-- ── Home Screen ───────────────────────────────────────────── -->
+        <section class="hero" id="section-hero">
             <h1>Intelligent Clinical <span class="gradient-text">Documentation</span></h1>
             <p class="subtitle">Focus on your patient. AuraScribe handles the documentation.</p>
         </section>
 
-        <section class="scribe-interface">
+        <!-- Patient Search Bar -->
+        <div id="patient-search-bar" class="card glass search-bar-card">
+            <div class="search-row">
+                <input type="text" id="search-input" placeholder="Search patient by ID or name..." />
+                <button class="copy-btn" id="search-btn">Search</button>
+            </div>
+            <div id="search-results" class="hidden"></div>
+        </div>
+
+        <section class="scribe-interface" id="section-scribe">
+
+            <!-- Patient Intake Form -->
+            <div id="patient-intake" class="card glass patient-intake-card">
+                <div class="card-header">
+                    <h2>Patient Information</h2>
+                    <span id="prior-encounter-banner" class="encounter-banner hidden"></span>
+                </div>
+                <div class="intake-form">
+                    <div class="intake-row">
+                        <div class="intake-field">
+                            <label for="intake-mrn">Patient ID (MRN) *</label>
+                            <input type="text" id="intake-mrn" placeholder="e.g. MRN-001" />
+                        </div>
+                        <div class="intake-field">
+                            <label for="intake-name">Full Name</label>
+                            <input type="text" id="intake-name" placeholder="Patient full name" />
+                        </div>
+                    </div>
+                    <div class="intake-row">
+                        <div class="intake-field">
+                            <label for="intake-sex">Sex</label>
+                            <select id="intake-sex">
+                                <option value="">Select</option>
+                                <option value="M">Male</option>
+                                <option value="F">Female</option>
+                                <option value="Other">Other</option>
+                            </select>
+                        </div>
+                        <div class="intake-field">
+                            <label for="intake-age">Age</label>
+                            <input type="number" id="intake-age" placeholder="Years" min="0" max="150" />
+                        </div>
+                        <div class="intake-field intake-field-action">
+                            <button class="copy-btn hidden" id="view-history-btn">View History</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
             <div class="control-panel card glass">
                 <div class="recorder-container">
                     <button id="record-btn" class="record-btn" aria-label="Start Recording">
@@ -130,6 +181,38 @@
                 <p>Generating clinical documentation...</p>
             </div>
         </section>
+
+        <!-- ── Daily Patient List Screen ─────────────────────────────── -->
+        <section id="screen-daily" class="scribe-interface hidden">
+            <div class="card glass screen-card">
+                <div class="card-header">
+                    <h2>Today's Patients</h2>
+                    <div class="card-actions">
+                        <input type="date" id="daily-date-picker" class="date-picker" />
+                        <button class="copy-btn" id="daily-refresh-btn">Refresh</button>
+                    </div>
+                </div>
+                <div id="daily-list-container"></div>
+                <div id="daily-empty-state" class="empty-state hidden">
+                    <p>No patients seen on this date.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- ── Patient Encounter History Screen ──────────────────────── -->
+        <section id="screen-history" class="scribe-interface hidden">
+            <div class="card glass screen-card">
+                <div class="card-header">
+                    <h2 id="history-patient-name">Patient History</h2>
+                    <button class="copy-btn" id="history-back-btn">Back</button>
+                </div>
+                <div id="history-patient-demo" class="patient-demo-bar"></div>
+                <div id="history-encounter-list"></div>
+                <div id="history-empty-state" class="empty-state hidden">
+                    <p>No completed notes for this patient yet.</p>
+                </div>
+            </div>
+        </section>
     </main>
 
     <footer>
@@ -166,7 +249,7 @@
         </table>
     </div>
 
-    <script src="app.js?v=1.0.2"></script>
+    <script src="app.js?v=2.7.0"></script>
 </body>
 
 </html>
