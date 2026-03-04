@@ -1,5 +1,6 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse, JSONResponse
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings
 from typing import List, Optional
@@ -9,10 +10,12 @@ import logging
 import time
 import random
 import sqlite3
+import httpx
 from datetime import datetime, timezone
 from contextlib import contextmanager, asynccontextmanager
 from openai import OpenAI
 from dotenv import load_dotenv
+import jwt as pyjwt
 
 # Configure logging
 logging.basicConfig(
@@ -29,6 +32,10 @@ load_dotenv()
 
 class Settings(BaseSettings):
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "")
+    google_client_secret: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
+    secret_key: str = os.getenv("SECRET_KEY", "dev-secret-change-in-prod")
+    app_url: str = os.getenv("APP_URL", "http://localhost:8000")
 
 settings = Settings()
 client = OpenAI(api_key=settings.openai_api_key)
@@ -38,16 +45,26 @@ from fastapi.responses import FileResponse
 
 # ── Database ────────────────────────────────────────────────────────────────
 
-DB_PATH = "aurascribe.db"
+DB_PATH = os.getenv("DB_PATH", "aurascribe.db")
 
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA foreign_keys=ON;")
         conn.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                google_id  TEXT    NOT NULL UNIQUE,
+                email      TEXT    NOT NULL,
+                name       TEXT    NOT NULL DEFAULT '',
+                picture    TEXT    NOT NULL DEFAULT '',
+                created_at TEXT    NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_users_google ON users(google_id);
+
             CREATE TABLE IF NOT EXISTS patients (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                mrn        TEXT    NOT NULL UNIQUE,
+                mrn        TEXT    NOT NULL,
                 full_name  TEXT    NOT NULL DEFAULT '',
                 sex        TEXT    NOT NULL DEFAULT '',
                 age        INTEGER NOT NULL DEFAULT 0,
@@ -66,6 +83,25 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_enc_patient ON encounters(patient_id);
             CREATE INDEX IF NOT EXISTS idx_enc_date    ON encounters(recorded_at);
         """)
+
+        # Migrations: add columns/indexes that may not exist in older DBs
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(patients)")}
+        if "user_id" not in cols:
+            conn.execute("ALTER TABLE patients ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
+        try:
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_patients_user_mrn ON patients(user_id, mrn)")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_patients_user ON patients(user_id)")
+        except sqlite3.OperationalError:
+            pass
+
+        # Assign orphaned patients (user_id IS NULL) to the first user if one exists
+        first_user = conn.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
+        if first_user:
+            conn.execute("UPDATE patients SET user_id = ? WHERE user_id IS NULL", (first_user[0],))
+
         conn.commit()
 
 @contextmanager
@@ -77,6 +113,40 @@ def get_db():
         yield conn
     finally:
         conn.close()
+
+# ── Auth Helpers ─────────────────────────────────────────────────────────────
+
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
+COOKIE_NAME = "as_session"
+COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
+
+def _make_jwt(user_id: int, email: str, name: str, picture: str) -> str:
+    payload = {
+        "sub": str(user_id),
+        "email": email,
+        "name": name,
+        "picture": picture,
+    }
+    return pyjwt.encode(payload, settings.secret_key, algorithm="HS256")
+
+def _decode_jwt(token: str) -> dict:
+    return pyjwt.decode(token, settings.secret_key, algorithms=["HS256"])
+
+def _get_current_user(request: Request) -> Optional[dict]:
+    token = request.cookies.get(COOKIE_NAME)
+    if not token:
+        return None
+    try:
+        return _decode_jwt(token)
+    except Exception:
+        return None
+
+def _require_user(request: Request) -> dict:
+    user = _get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user
 
 # ── Pydantic Models ──────────────────────────────────────────────────────────
 
@@ -109,6 +179,12 @@ class ClinicalDocumentationResponse(BaseModel):
     """Structured response from LLM"""
     note: MedicalNote
     questions: List[str]
+
+class UserResponse(BaseModel):
+    id: int
+    email: str
+    name: str
+    picture: str
 
 class PatientResponse(BaseModel):
     id: int
@@ -174,46 +250,151 @@ app.add_middleware(
 # Serve static files from the 'static' directory
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# ── Auth Routes ───────────────────────────────────────────────────────────────
+
+@app.get("/auth/login")
+async def auth_login():
+    """Redirect user to Google OAuth consent screen."""
+    if not settings.google_client_id:
+        raise HTTPException(status_code=500, detail="Google OAuth not configured")
+    redirect_uri = f"{settings.app_url}/auth/callback"
+    url = (
+        "https://accounts.google.com/o/oauth2/v2/auth"
+        f"?client_id={settings.google_client_id}"
+        f"&redirect_uri={redirect_uri}"
+        "&response_type=code"
+        "&scope=openid%20email%20profile"
+        "&access_type=offline"
+    )
+    return RedirectResponse(url)
+
+@app.get("/auth/callback")
+async def auth_callback(code: str):
+    """Exchange Google code for user info, upsert user, set session cookie."""
+    redirect_uri = f"{settings.app_url}/auth/callback"
+    async with httpx.AsyncClient() as hc:
+        # Exchange code for tokens
+        token_res = await hc.post(GOOGLE_TOKEN_URL, data={
+            "code": code,
+            "client_id": settings.google_client_id,
+            "client_secret": settings.google_client_secret,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+        })
+        if token_res.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to exchange Google code")
+        tokens = token_res.json()
+
+        # Fetch user profile
+        user_res = await hc.get(
+            GOOGLE_USERINFO_URL,
+            headers={"Authorization": f"Bearer {tokens['access_token']}"}
+        )
+        if user_res.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to fetch Google user info")
+        g = user_res.json()
+
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        existing = conn.execute(
+            "SELECT * FROM users WHERE google_id = ?", (g["id"],)
+        ).fetchone()
+        if existing:
+            user_id = existing["id"]
+            # Keep name/picture up to date
+            conn.execute(
+                "UPDATE users SET name=?, picture=? WHERE id=?",
+                (g.get("name", ""), g.get("picture", ""), user_id)
+            )
+        else:
+            conn.execute(
+                "INSERT INTO users (google_id, email, name, picture, created_at) VALUES (?,?,?,?,?)",
+                (g["id"], g["email"], g.get("name", ""), g.get("picture", ""), now)
+            )
+            user_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.commit()
+
+    token = _make_jwt(user_id, g["email"], g.get("name", ""), g.get("picture", ""))
+    resp = RedirectResponse(url="/", status_code=302)
+    resp.set_cookie(
+        COOKIE_NAME, token,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=settings.app_url.startswith("https"),
+    )
+    return resp
+
+@app.get("/auth/me", response_model=UserResponse)
+async def auth_me(request: Request):
+    """Return the currently logged-in user."""
+    user = _get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (int(user["sub"]),)).fetchone()
+    if not row:
+        raise HTTPException(status_code=401, detail="User not found")
+    d = dict(row)
+    return UserResponse(id=d["id"], email=d["email"], name=d["name"], picture=d["picture"])
+
+@app.post("/auth/logout")
+async def auth_logout():
+    """Clear session cookie."""
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(COOKIE_NAME)
+    return resp
+
 # ── Patient Routes ───────────────────────────────────────────────────────────
 
 @app.post("/patients", response_model=PatientResponse)
 async def create_or_get_patient(
+    request: Request,
     mrn: str = Form(...),
     full_name: str = Form(""),
     sex: str = Form(""),
     age: int = Form(0),
 ):
+    user = _require_user(request)
+    user_id = int(user["sub"])
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
-        existing = conn.execute("SELECT * FROM patients WHERE mrn = ?", (mrn,)).fetchone()
+        existing = conn.execute(
+            "SELECT * FROM patients WHERE user_id = ? AND mrn = ?", (user_id, mrn)
+        ).fetchone()
         if existing:
             return PatientResponse(**dict(existing))
         conn.execute(
-            "INSERT INTO patients (mrn, full_name, sex, age, created_at) VALUES (?, ?, ?, ?, ?)",
-            (mrn, full_name, sex, age, now)
+            "INSERT INTO patients (user_id, mrn, full_name, sex, age, created_at) VALUES (?,?,?,?,?,?)",
+            (user_id, mrn, full_name, sex, age, now)
         )
         conn.commit()
-        row = conn.execute("SELECT * FROM patients WHERE mrn = ?", (mrn,)).fetchone()
+        row = conn.execute(
+            "SELECT * FROM patients WHERE user_id = ? AND mrn = ?", (user_id, mrn)
+        ).fetchone()
         return PatientResponse(**dict(row))
 
 # NOTE: /patients/search must be declared before /patients/{mrn}
 @app.get("/patients/search", response_model=List[PatientLookupResponse])
-async def search_patients(q: str):
+async def search_patients(request: Request, q: str):
+    user = _require_user(request)
+    user_id = int(user["sub"])
     if len(q) < 2:
         return []
     pattern = f"%{q}%"
     with get_db() as conn:
         rows = conn.execute(
             """SELECT p.*,
-                      COUNT(e.id)    AS encounter_count,
+                      COUNT(e.id)        AS encounter_count,
                       MAX(e.recorded_at) AS last_encounter_at
                FROM patients p
                LEFT JOIN encounters e ON e.patient_id = p.id
-               WHERE p.mrn LIKE ? COLLATE NOCASE OR p.full_name LIKE ? COLLATE NOCASE
+               WHERE p.user_id = ?
+                 AND (p.mrn LIKE ? COLLATE NOCASE OR p.full_name LIKE ? COLLATE NOCASE)
                GROUP BY p.id
                ORDER BY p.full_name COLLATE NOCASE
                LIMIT 20""",
-            (pattern, pattern)
+            (user_id, pattern, pattern)
         ).fetchall()
     results = []
     for row in rows:
@@ -230,7 +411,9 @@ async def search_patients(q: str):
     return results
 
 @app.get("/patients/{mrn}", response_model=PatientLookupResponse)
-async def get_patient_by_mrn(mrn: str):
+async def get_patient_by_mrn(mrn: str, request: Request):
+    user = _require_user(request)
+    user_id = int(user["sub"])
     with get_db() as conn:
         row = conn.execute(
             """SELECT p.*,
@@ -238,9 +421,9 @@ async def get_patient_by_mrn(mrn: str):
                       MAX(e.recorded_at) AS last_encounter_at
                FROM patients p
                LEFT JOIN encounters e ON e.patient_id = p.id
-               WHERE p.mrn = ?
+               WHERE p.user_id = ? AND p.mrn = ?
                GROUP BY p.id""",
-            (mrn,)
+            (user_id, mrn)
         ).fetchone()
     if not row:
         return PatientLookupResponse(exists=False)
@@ -256,9 +439,13 @@ async def get_patient_by_mrn(mrn: str):
     )
 
 @app.get("/patients/{mrn}/encounters", response_model=List[EncounterSummary])
-async def get_patient_encounters(mrn: str):
+async def get_patient_encounters(mrn: str, request: Request):
+    user = _require_user(request)
+    user_id = int(user["sub"])
     with get_db() as conn:
-        patient = conn.execute("SELECT id FROM patients WHERE mrn = ?", (mrn,)).fetchone()
+        patient = conn.execute(
+            "SELECT id FROM patients WHERE user_id = ? AND mrn = ?", (user_id, mrn)
+        ).fetchone()
         if not patient:
             raise HTTPException(status_code=404, detail="Patient not found")
         rows = conn.execute(
@@ -291,10 +478,18 @@ class EncounterUpdateRequest(BaseModel):
     note: MedicalNote
 
 @app.put("/encounters/{encounter_id}", response_model=EncounterDetail)
-async def update_encounter(encounter_id: int, body: EncounterUpdateRequest):
+async def update_encounter(encounter_id: int, body: EncounterUpdateRequest, request: Request):
     """Save an edited note back to the encounter."""
+    user = _require_user(request)
+    user_id = int(user["sub"])
     with get_db() as conn:
-        row = conn.execute("SELECT * FROM encounters WHERE id = ?", (encounter_id,)).fetchone()
+        # Verify the encounter belongs to this user via patient ownership
+        row = conn.execute(
+            """SELECT e.* FROM encounters e
+               JOIN patients p ON p.id = e.patient_id
+               WHERE e.id = ? AND p.user_id = ?""",
+            (encounter_id, user_id)
+        ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Encounter not found")
         d = dict(row)
@@ -323,9 +518,16 @@ async def update_encounter(encounter_id: int, body: EncounterUpdateRequest):
     )
 
 @app.get("/encounters/{encounter_id}", response_model=EncounterDetail)
-async def get_encounter(encounter_id: int):
+async def get_encounter(encounter_id: int, request: Request):
+    user = _require_user(request)
+    user_id = int(user["sub"])
     with get_db() as conn:
-        row = conn.execute("SELECT * FROM encounters WHERE id = ?", (encounter_id,)).fetchone()
+        row = conn.execute(
+            """SELECT e.* FROM encounters e
+               JOIN patients p ON p.id = e.patient_id
+               WHERE e.id = ? AND p.user_id = ?""",
+            (encounter_id, user_id)
+        ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Encounter not found")
     d = dict(row)
@@ -345,10 +547,11 @@ async def get_encounter(encounter_id: int):
     )
 
 @app.get("/daily", response_model=List[DailyPatientEntry])
-async def get_daily_list(date: Optional[str] = None):
+async def get_daily_list(request: Request, date: Optional[str] = None):
+    user = _require_user(request)
+    user_id = int(user["sub"])
     if not date:
         date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    # Match encounters whose recorded_at starts with the given date (ISO prefix)
     date_prefix = f"{date}%"
     with get_db() as conn:
         rows = conn.execute(
@@ -357,10 +560,10 @@ async def get_daily_list(date: Optional[str] = None):
                       MAX(e.recorded_at) AS last_encounter_at
                FROM encounters e
                JOIN patients p ON p.id = e.patient_id
-               WHERE e.recorded_at LIKE ?
+               WHERE e.recorded_at LIKE ? AND p.user_id = ?
                GROUP BY p.id
                ORDER BY last_encounter_at DESC""",
-            (date_prefix,)
+            (date_prefix, user_id)
         ).fetchall()
     entries = []
     for row in rows:
@@ -414,17 +617,15 @@ def call_with_retries(func, *args, **kwargs):
 
 @app.post("/analyze", response_model=ClinicalDocumentation)
 async def analyze_audio(
+    request: Request,
     audio: UploadFile = File(...),
     mrn: Optional[str] = Form(None),
     full_name: Optional[str] = Form(None),
     sex: Optional[str] = Form(None),
     age: Optional[int] = Form(None),
 ):
-    """
-    Receives audio file, transcribes it using Whisper (excellent for Hindi),
-    and generates clinical documentation using GPT-5-nano.
-    Optionally associates the encounter with a patient if mrn is provided.
-    """
+    user = _require_user(request)
+    user_id = int(user["sub"])
     logger.info(f"Received audio analysis request for file: {audio.filename}")
     temp_file_path = f"temp_{audio.filename}"
 
@@ -435,7 +636,7 @@ async def analyze_audio(
             mock_data["error"] = "API Key is missing or placeholder. Please update .env file."
             # Still persist encounter if patient info provided
             if mrn:
-                patient_resp, encounter_id = _persist_encounter(mrn, full_name or "", sex or "", age or 0, mock_data)
+                patient_resp, encounter_id = _persist_encounter(user_id, mrn, full_name or "", sex or "", age or 0, mock_data)
                 mock_data["encounter_id"] = encounter_id
                 mock_data["patient"] = patient_resp.model_dump() if patient_resp else None
             return mock_data
@@ -473,7 +674,7 @@ async def analyze_audio(
             mock_data = get_hindi_mock_data()
             mock_data["error"] = f"Transcription failed: {str(e)}. Using mock data."
             if mrn:
-                patient_resp, encounter_id = _persist_encounter(mrn, full_name or "", sex or "", age or 0, mock_data)
+                patient_resp, encounter_id = _persist_encounter(user_id, mrn, full_name or "", sex or "", age or 0, mock_data)
                 mock_data["encounter_id"] = encounter_id
                 mock_data["patient"] = patient_resp.model_dump() if patient_resp else None
             return mock_data
@@ -594,7 +795,7 @@ IMPORTANT REMINDERS:
 
         # 4. Persist encounter if patient info was provided
         if mrn:
-            patient_resp, encounter_id = _persist_encounter(mrn, full_name or "", sex or "", age or 0, analysis_data)
+            patient_resp, encounter_id = _persist_encounter(user_id, mrn, full_name or "", sex or "", age or 0, analysis_data)
             analysis_data["encounter_id"] = encounter_id
             analysis_data["patient"] = patient_resp.model_dump() if patient_resp else None
 
@@ -611,22 +812,26 @@ IMPORTANT REMINDERS:
             except Exception as e:
                 print(f"Warning: Failed to delete temp file {temp_file_path}: {e}")
 
-def _persist_encounter(mrn: str, full_name: str, sex: str, age: int, analysis_data: dict):
+def _persist_encounter(user_id: int, mrn: str, full_name: str, sex: str, age: int, analysis_data: dict):
     """Upsert patient and insert encounter row. Returns (PatientResponse, encounter_id)."""
     now = datetime.now(timezone.utc).isoformat()
     try:
         with get_db() as conn:
-            # Upsert patient
-            existing = conn.execute("SELECT * FROM patients WHERE mrn = ?", (mrn,)).fetchone()
+            # Upsert patient scoped to user
+            existing = conn.execute(
+                "SELECT * FROM patients WHERE user_id = ? AND mrn = ?", (user_id, mrn)
+            ).fetchone()
             if existing:
                 patient_row = dict(existing)
             else:
                 conn.execute(
-                    "INSERT INTO patients (mrn, full_name, sex, age, created_at) VALUES (?, ?, ?, ?, ?)",
-                    (mrn, full_name, sex, age, now)
+                    "INSERT INTO patients (user_id, mrn, full_name, sex, age, created_at) VALUES (?,?,?,?,?,?)",
+                    (user_id, mrn, full_name, sex, age, now)
                 )
                 conn.commit()
-                patient_row = dict(conn.execute("SELECT * FROM patients WHERE mrn = ?", (mrn,)).fetchone())
+                patient_row = dict(conn.execute(
+                    "SELECT * FROM patients WHERE user_id = ? AND mrn = ?", (user_id, mrn)
+                ).fetchone())
 
             patient_resp = PatientResponse(**patient_row)
 

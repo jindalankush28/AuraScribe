@@ -10,7 +10,10 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="css/base.css">
+    <link rel="stylesheet" href="css/components.css">
+    <link rel="stylesheet" href="css/patients.css">
+    <link rel="stylesheet" href="css/print.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 </head>
 
@@ -19,6 +22,22 @@
         <div class="blob blob-1"></div>
         <div class="blob blob-2"></div>
         <div class="blob blob-3"></div>
+    </div>
+
+    <!-- ── Login Screen ─────────────────────────────────────────────── -->
+    <div id="login-screen" class="login-screen hidden">
+        <div class="login-card glass">
+            <div class="login-logo">
+                <span class="logo-icon">✨</span>
+                <span class="logo-text">AuraScribe</span>
+            </div>
+            <h2 class="login-title">AI Medical Scribe</h2>
+            <p class="login-subtitle">Sign in to access your patient records and clinical notes.</p>
+            <a href="/auth/login" class="google-signin-btn">
+                <svg width="20" height="20" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+                Sign in with Google
+            </a>
+        </div>
     </div>
 
     <nav>
@@ -32,6 +51,11 @@
             <span class="status-indicator" id="connection-status">
                 <span class="dot"></span> System Ready
             </span>
+            <div class="nav-user hidden" id="nav-user">
+                <img class="nav-avatar" id="nav-avatar" src="" alt="avatar" />
+                <span class="nav-user-name" id="nav-user-name"></span>
+                <button class="nav-btn nav-signout-btn" id="nav-signout">Sign out</button>
+            </div>
         </div>
     </nav>
 
@@ -123,7 +147,7 @@
                             <div class="card-actions">
                                 <button class="copy-btn" id="edit-note">Edit</button>
                                 <button class="copy-btn" id="copy-note">Copy</button>
-                                <button class="copy-btn" id="pdf-btn">Download PDF</button>
+                                <button class="copy-btn print-btn" id="pdf-btn">Download PDF</button>
                                 <button class="copy-btn print-btn" id="print-btn">Print</button>
                             </div>
                         </div>
@@ -249,7 +273,12 @@
         </table>
     </div>
 
-    <script src="app.js?v=2.7.0"></script>
+    <!-- Load order matters: utils → auth → patients → encounters → scribe -->
+    <script src="js/utils.js"></script>
+    <script src="js/auth.js"></script>
+    <script src="js/patients.js"></script>
+    <script src="js/encounters.js"></script>
+    <script src="js/scribe.js"></script>
 </body>
 
 </html>
