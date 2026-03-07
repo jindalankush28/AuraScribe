@@ -9,7 +9,8 @@ import json
 import logging
 import time
 import random
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import httpx
 from datetime import datetime, timezone
 from contextlib import contextmanager, asynccontextmanager
@@ -45,72 +46,65 @@ from fastapi.responses import FileResponse
 
 # ── Database ────────────────────────────────────────────────────────────────
 
-DB_PATH = os.getenv("DB_PATH", "aurascribe.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+def _get_conn():
+    url = DATABASE_URL
+    # Render provides postgres:// but psycopg2 needs postgresql://
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    return psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
 
 def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA foreign_keys=ON;")
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS users (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                google_id  TEXT    NOT NULL UNIQUE,
-                email      TEXT    NOT NULL,
-                name       TEXT    NOT NULL DEFAULT '',
-                picture    TEXT    NOT NULL DEFAULT '',
-                created_at TEXT    NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_users_google ON users(google_id);
-
-            CREATE TABLE IF NOT EXISTS patients (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                mrn        TEXT    NOT NULL,
-                full_name  TEXT    NOT NULL DEFAULT '',
-                sex        TEXT    NOT NULL DEFAULT '',
-                age        INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT    NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_patients_mrn  ON patients(mrn);
-            CREATE INDEX IF NOT EXISTS idx_patients_name ON patients(full_name COLLATE NOCASE);
-
-            CREATE TABLE IF NOT EXISTS encounters (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                patient_id  INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
-                recorded_at TEXT    NOT NULL,
-                note_json   TEXT    NOT NULL,
-                transcript  TEXT    NOT NULL DEFAULT ''
-            );
-            CREATE INDEX IF NOT EXISTS idx_enc_patient ON encounters(patient_id);
-            CREATE INDEX IF NOT EXISTS idx_enc_date    ON encounters(recorded_at);
-        """)
-
-        # Migrations: add columns/indexes that may not exist in older DBs
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(patients)")}
-        if "user_id" not in cols:
-            conn.execute("ALTER TABLE patients ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE CASCADE")
-        try:
-            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_patients_user_mrn ON patients(user_id, mrn)")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_patients_user ON patients(user_id)")
-        except sqlite3.OperationalError:
-            pass
-
-        # Assign orphaned patients (user_id IS NULL) to the first user if one exists
-        first_user = conn.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
-        if first_user:
-            conn.execute("UPDATE patients SET user_id = ? WHERE user_id IS NULL", (first_user[0],))
-
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id         SERIAL PRIMARY KEY,
+                    google_id  TEXT    NOT NULL UNIQUE,
+                    email      TEXT    NOT NULL,
+                    name       TEXT    NOT NULL DEFAULT '',
+                    picture    TEXT    NOT NULL DEFAULT '',
+                    created_at TEXT    NOT NULL
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_users_google ON users(google_id)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS patients (
+                    id         SERIAL PRIMARY KEY,
+                    user_id    INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    mrn        TEXT    NOT NULL,
+                    full_name  TEXT    NOT NULL DEFAULT '',
+                    sex        TEXT    NOT NULL DEFAULT '',
+                    age        INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT    NOT NULL,
+                    UNIQUE(user_id, mrn)
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_patients_user ON patients(user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_patients_name ON patients(lower(full_name))")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS encounters (
+                    id          SERIAL PRIMARY KEY,
+                    patient_id  INTEGER NOT NULL REFERENCES patients(id) ON DELETE CASCADE,
+                    recorded_at TEXT    NOT NULL,
+                    note_json   TEXT    NOT NULL,
+                    transcript  TEXT    NOT NULL DEFAULT ''
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_enc_patient ON encounters(patient_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_enc_date ON encounters(recorded_at)")
         conn.commit()
 
 @contextmanager
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON;")
+    conn = _get_conn()
     try:
         yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -296,23 +290,21 @@ async def auth_callback(code: str):
 
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
-        existing = conn.execute(
-            "SELECT * FROM users WHERE google_id = ?", (g["id"],)
-        ).fetchone()
-        if existing:
-            user_id = existing["id"]
-            # Keep name/picture up to date
-            conn.execute(
-                "UPDATE users SET name=?, picture=? WHERE id=?",
-                (g.get("name", ""), g.get("picture", ""), user_id)
-            )
-        else:
-            conn.execute(
-                "INSERT INTO users (google_id, email, name, picture, created_at) VALUES (?,?,?,?,?)",
-                (g["id"], g["email"], g.get("name", ""), g.get("picture", ""), now)
-            )
-            user_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.commit()
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM users WHERE google_id = %s", (g["id"],))
+            existing = cur.fetchone()
+            if existing:
+                user_id = existing["id"]
+                cur.execute(
+                    "UPDATE users SET name=%s, picture=%s WHERE id=%s",
+                    (g.get("name", ""), g.get("picture", ""), user_id)
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO users (google_id, email, name, picture, created_at) VALUES (%s,%s,%s,%s,%s) RETURNING id",
+                    (g["id"], g["email"], g.get("name", ""), g.get("picture", ""), now)
+                )
+                user_id = cur.fetchone()["id"]
 
     token = _make_jwt(user_id, g["email"], g.get("name", ""), g.get("picture", ""))
     resp = RedirectResponse(url="/", status_code=302)
@@ -332,7 +324,9 @@ async def auth_me(request: Request):
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
     with get_db() as conn:
-        row = conn.execute("SELECT * FROM users WHERE id = ?", (int(user["sub"]),)).fetchone()
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM users WHERE id = %s", (int(user["sub"]),))
+            row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=401, detail="User not found")
     d = dict(row)
@@ -359,20 +353,16 @@ async def create_or_get_patient(
     user_id = int(user["sub"])
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
-        existing = conn.execute(
-            "SELECT * FROM patients WHERE user_id = ? AND mrn = ?", (user_id, mrn)
-        ).fetchone()
-        if existing:
-            return PatientResponse(**dict(existing))
-        conn.execute(
-            "INSERT INTO patients (user_id, mrn, full_name, sex, age, created_at) VALUES (?,?,?,?,?,?)",
-            (user_id, mrn, full_name, sex, age, now)
-        )
-        conn.commit()
-        row = conn.execute(
-            "SELECT * FROM patients WHERE user_id = ? AND mrn = ?", (user_id, mrn)
-        ).fetchone()
-        return PatientResponse(**dict(row))
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM patients WHERE user_id = %s AND mrn = %s", (user_id, mrn))
+            existing = cur.fetchone()
+            if existing:
+                return PatientResponse(**dict(existing))
+            cur.execute(
+                "INSERT INTO patients (user_id, mrn, full_name, sex, age, created_at) VALUES (%s,%s,%s,%s,%s,%s) RETURNING *",
+                (user_id, mrn, full_name, sex, age, now)
+            )
+            return PatientResponse(**dict(cur.fetchone()))
 
 # NOTE: /patients/search must be declared before /patients/{mrn}
 @app.get("/patients/search", response_model=List[PatientLookupResponse])
@@ -383,19 +373,21 @@ async def search_patients(request: Request, q: str):
         return []
     pattern = f"%{q}%"
     with get_db() as conn:
-        rows = conn.execute(
-            """SELECT p.*,
-                      COUNT(e.id)        AS encounter_count,
-                      MAX(e.recorded_at) AS last_encounter_at
-               FROM patients p
-               LEFT JOIN encounters e ON e.patient_id = p.id
-               WHERE p.user_id = ?
-                 AND (p.mrn LIKE ? COLLATE NOCASE OR p.full_name LIKE ? COLLATE NOCASE)
-               GROUP BY p.id
-               ORDER BY p.full_name COLLATE NOCASE
-               LIMIT 20""",
-            (user_id, pattern, pattern)
-        ).fetchall()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT p.*,
+                          COUNT(e.id)        AS encounter_count,
+                          MAX(e.recorded_at) AS last_encounter_at
+                   FROM patients p
+                   LEFT JOIN encounters e ON e.patient_id = p.id
+                   WHERE p.user_id = %s
+                     AND (p.mrn ILIKE %s OR p.full_name ILIKE %s)
+                   GROUP BY p.id
+                   ORDER BY lower(p.full_name)
+                   LIMIT 20""",
+                (user_id, pattern, pattern)
+            )
+            rows = cur.fetchall()
     results = []
     for row in rows:
         d = dict(row)
@@ -415,16 +407,18 @@ async def get_patient_by_mrn(mrn: str, request: Request):
     user = _require_user(request)
     user_id = int(user["sub"])
     with get_db() as conn:
-        row = conn.execute(
-            """SELECT p.*,
-                      COUNT(e.id)        AS encounter_count,
-                      MAX(e.recorded_at) AS last_encounter_at
-               FROM patients p
-               LEFT JOIN encounters e ON e.patient_id = p.id
-               WHERE p.user_id = ? AND p.mrn = ?
-               GROUP BY p.id""",
-            (user_id, mrn)
-        ).fetchone()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT p.*,
+                          COUNT(e.id)        AS encounter_count,
+                          MAX(e.recorded_at) AS last_encounter_at
+                   FROM patients p
+                   LEFT JOIN encounters e ON e.patient_id = p.id
+                   WHERE p.user_id = %s AND p.mrn = %s
+                   GROUP BY p.id""",
+                (user_id, mrn)
+            )
+            row = cur.fetchone()
     if not row:
         return PatientLookupResponse(exists=False)
     d = dict(row)
@@ -443,15 +437,16 @@ async def get_patient_encounters(mrn: str, request: Request):
     user = _require_user(request)
     user_id = int(user["sub"])
     with get_db() as conn:
-        patient = conn.execute(
-            "SELECT id FROM patients WHERE user_id = ? AND mrn = ?", (user_id, mrn)
-        ).fetchone()
-        if not patient:
-            raise HTTPException(status_code=404, detail="Patient not found")
-        rows = conn.execute(
-            "SELECT * FROM encounters WHERE patient_id = ? ORDER BY recorded_at DESC",
-            (patient["id"],)
-        ).fetchall()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM patients WHERE user_id = %s AND mrn = %s", (user_id, mrn))
+            patient = cur.fetchone()
+            if not patient:
+                raise HTTPException(status_code=404, detail="Patient not found")
+            cur.execute(
+                "SELECT * FROM encounters WHERE patient_id = %s ORDER BY recorded_at DESC",
+                (patient["id"],)
+            )
+            rows = cur.fetchall()
     summaries = []
     for row in rows:
         d = dict(row)
@@ -483,28 +478,27 @@ async def update_encounter(encounter_id: int, body: EncounterUpdateRequest, requ
     user = _require_user(request)
     user_id = int(user["sub"])
     with get_db() as conn:
-        # Verify the encounter belongs to this user via patient ownership
-        row = conn.execute(
-            """SELECT e.* FROM encounters e
-               JOIN patients p ON p.id = e.patient_id
-               WHERE e.id = ? AND p.user_id = ?""",
-            (encounter_id, user_id)
-        ).fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Encounter not found")
-        d = dict(row)
-        # Merge the updated note into the stored JSON (preserve transcript + questions)
-        try:
-            stored = json.loads(d["note_json"])
-        except Exception:
-            stored = {}
-        stored["note"] = body.note.model_dump()
-        conn.execute(
-            "UPDATE encounters SET note_json = ? WHERE id = ?",
-            (json.dumps(stored), encounter_id)
-        )
-        conn.commit()
-        updated_row = conn.execute("SELECT * FROM encounters WHERE id = ?", (encounter_id,)).fetchone()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT e.* FROM encounters e
+                   JOIN patients p ON p.id = e.patient_id
+                   WHERE e.id = %s AND p.user_id = %s""",
+                (encounter_id, user_id)
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Encounter not found")
+            d = dict(row)
+            try:
+                stored = json.loads(d["note_json"])
+            except Exception:
+                stored = {}
+            stored["note"] = body.note.model_dump()
+            cur.execute(
+                "UPDATE encounters SET note_json = %s WHERE id = %s RETURNING *",
+                (json.dumps(stored), encounter_id)
+            )
+            updated_row = cur.fetchone()
 
     d2 = dict(updated_row)
     note_data2 = json.loads(d2["note_json"])
@@ -522,12 +516,14 @@ async def get_encounter(encounter_id: int, request: Request):
     user = _require_user(request)
     user_id = int(user["sub"])
     with get_db() as conn:
-        row = conn.execute(
-            """SELECT e.* FROM encounters e
-               JOIN patients p ON p.id = e.patient_id
-               WHERE e.id = ? AND p.user_id = ?""",
-            (encounter_id, user_id)
-        ).fetchone()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT e.* FROM encounters e
+                   JOIN patients p ON p.id = e.patient_id
+                   WHERE e.id = %s AND p.user_id = %s""",
+                (encounter_id, user_id)
+            )
+            row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Encounter not found")
     d = dict(row)
@@ -554,17 +550,19 @@ async def get_daily_list(request: Request, date: Optional[str] = None):
         date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     date_prefix = f"{date}%"
     with get_db() as conn:
-        rows = conn.execute(
-            """SELECT p.*,
-                      COUNT(e.id)        AS encounter_count,
-                      MAX(e.recorded_at) AS last_encounter_at
-               FROM encounters e
-               JOIN patients p ON p.id = e.patient_id
-               WHERE e.recorded_at LIKE ? AND p.user_id = ?
-               GROUP BY p.id
-               ORDER BY last_encounter_at DESC""",
-            (date_prefix, user_id)
-        ).fetchall()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT p.*,
+                          COUNT(e.id)        AS encounter_count,
+                          MAX(e.recorded_at) AS last_encounter_at
+                   FROM encounters e
+                   JOIN patients p ON p.id = e.patient_id
+                   WHERE e.recorded_at LIKE %s AND p.user_id = %s
+                   GROUP BY p.id
+                   ORDER BY last_encounter_at DESC""",
+                (date_prefix, user_id)
+            )
+            rows = cur.fetchall()
     entries = []
     for row in rows:
         d = dict(row)
@@ -817,33 +815,27 @@ def _persist_encounter(user_id: int, mrn: str, full_name: str, sex: str, age: in
     now = datetime.now(timezone.utc).isoformat()
     try:
         with get_db() as conn:
-            # Upsert patient scoped to user
-            existing = conn.execute(
-                "SELECT * FROM patients WHERE user_id = ? AND mrn = ?", (user_id, mrn)
-            ).fetchone()
-            if existing:
-                patient_row = dict(existing)
-            else:
-                conn.execute(
-                    "INSERT INTO patients (user_id, mrn, full_name, sex, age, created_at) VALUES (?,?,?,?,?,?)",
-                    (user_id, mrn, full_name, sex, age, now)
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM patients WHERE user_id = %s AND mrn = %s", (user_id, mrn))
+                existing = cur.fetchone()
+                if existing:
+                    patient_row = dict(existing)
+                else:
+                    cur.execute(
+                        "INSERT INTO patients (user_id, mrn, full_name, sex, age, created_at) VALUES (%s,%s,%s,%s,%s,%s) RETURNING *",
+                        (user_id, mrn, full_name, sex, age, now)
+                    )
+                    patient_row = dict(cur.fetchone())
+
+                patient_resp = PatientResponse(**patient_row)
+
+                note_json = json.dumps(analysis_data)
+                transcript = analysis_data.get("transcript", "")
+                cur.execute(
+                    "INSERT INTO encounters (patient_id, recorded_at, note_json, transcript) VALUES (%s,%s,%s,%s) RETURNING id",
+                    (patient_row["id"], now, note_json, transcript)
                 )
-                conn.commit()
-                patient_row = dict(conn.execute(
-                    "SELECT * FROM patients WHERE user_id = ? AND mrn = ?", (user_id, mrn)
-                ).fetchone())
-
-            patient_resp = PatientResponse(**patient_row)
-
-            # Insert encounter
-            note_json = json.dumps(analysis_data)
-            transcript = analysis_data.get("transcript", "")
-            conn.execute(
-                "INSERT INTO encounters (patient_id, recorded_at, note_json, transcript) VALUES (?, ?, ?, ?)",
-                (patient_row["id"], now, note_json, transcript)
-            )
-            conn.commit()
-            encounter_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                encounter_id = cur.fetchone()["id"]
 
         return patient_resp, encounter_id
     except Exception as e:
