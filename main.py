@@ -53,7 +53,10 @@ def _get_conn():
     # Render provides postgres:// but psycopg2 needs postgresql://
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
-    return psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
+    conn = psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
+    # Ensure we're NOT in autocommit mode so transactions work properly
+    conn.autocommit = False
+    return conn
 
 def init_db():
     with _get_conn() as conn:
@@ -816,19 +819,23 @@ def _persist_encounter(user_id: int, mrn: str, full_name: str, sex: str, age: in
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
+                # Check if patient exists
                 cur.execute("SELECT * FROM patients WHERE user_id = %s AND mrn = %s", (user_id, mrn))
                 existing = cur.fetchone()
                 if existing:
                     patient_row = dict(existing)
+                    logger.info(f"Found existing patient: user_id={user_id}, mrn={mrn}, patient_id={patient_row['id']}")
                 else:
                     cur.execute(
                         "INSERT INTO patients (user_id, mrn, full_name, sex, age, created_at) VALUES (%s,%s,%s,%s,%s,%s) RETURNING *",
                         (user_id, mrn, full_name, sex, age, now)
                     )
                     patient_row = dict(cur.fetchone())
+                    logger.info(f"Created new patient: user_id={user_id}, mrn={mrn}, patient_id={patient_row['id']}")
 
                 patient_resp = PatientResponse(**patient_row)
 
+                # Insert encounter
                 note_json = json.dumps(analysis_data)
                 transcript = analysis_data.get("transcript", "")
                 cur.execute(
@@ -836,11 +843,13 @@ def _persist_encounter(user_id: int, mrn: str, full_name: str, sex: str, age: in
                     (patient_row["id"], now, note_json, transcript)
                 )
                 encounter_id = cur.fetchone()["id"]
+                logger.info(f"Created encounter: encounter_id={encounter_id}, patient_id={patient_row['id']}, recorded_at={now}")
 
+        logger.info(f"Transaction committed successfully for encounter_id={encounter_id}")
         return patient_resp, encounter_id
     except Exception as e:
-        logger.error(f"Failed to persist encounter: {e}")
-        return None, None
+        logger.critical(f"Failed to persist encounter: {type(e).__name__}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 def get_hindi_mock_data():
     """Fallback mock data for Hindi encounters."""
